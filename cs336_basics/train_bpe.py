@@ -108,12 +108,12 @@ def _chunk_worker_wrapper(job: tuple[str, int, int, tuple[str, ...]]) -> Counter
     return chunk_worker(*job)
 
 
-def train_bpe(input_path: str | os.PathLike,
-    vocab_size: int,
-    special_tokens: list[str] | None = None,
-    num_workers: int = 1,
-    **kwargs,
-) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+def count_pretoken_frequencies(
+    input_path: str, 
+    special_tokens: list[str], 
+    num_workers: int
+    ) -> Counter[Token]:
+    
     if special_tokens is None:
         special_tokens = []
 
@@ -144,6 +144,15 @@ def train_bpe(input_path: str | os.PathLike,
         with mp.Pool(processes=worker_count) as pool:
             for result in pool.imap_unordered(_chunk_worker_wrapper, jobs):
                 token_counts.update(result)
+
+    return token_counts
+
+
+def train_bpe_from_token_counts(
+    token_counts: Counter[Token], 
+    vocab_size: int, 
+    special_tokens: list[str] | None = None
+    ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
 
     vocab = {i: BYTE_TOKENS[i] for i in range(256)}
     next_id = 256
@@ -221,5 +230,14 @@ def train_bpe(input_path: str | os.PathLike,
                 pair_counts[pair] += count * occurrences
                 pair_to_tokens[pair].add(new_token)
                 heapq.heappush(pair_heap, (-pair_counts[pair], Reverse_Pair(pair), pair))
-
     return vocab, merges
+
+def train_bpe(input_path: str | os.PathLike,
+    vocab_size: int,
+    special_tokens: list[str] | None = None,
+    num_workers: int = 1,
+    **kwargs,
+) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
+    
+    token_counts = count_pretoken_frequencies(input_path, special_tokens or [], num_workers)
+    return train_bpe_from_token_counts(token_counts, vocab_size, special_tokens)
