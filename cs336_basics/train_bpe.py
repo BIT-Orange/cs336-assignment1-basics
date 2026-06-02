@@ -4,12 +4,11 @@ import heapq
 import regex as re
 import os
 import math
+import multiprocessing as mp
 
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 from typing import BinaryIO
-from .pretokenization_example import find_chunk_boundaries
 
 GPT2_PRETOKENIZER = re.compile(r"""'(?:[smdt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+""")
 BYTE_TOKENS = tuple(bytes([byte]) for byte in range(256))
@@ -52,9 +51,67 @@ def pretoken_count(text: str, special_tokens: list[str]) -> Counter[Token]:
     return counts
 
 
+def find_chunk_boundaries(
+    file: BinaryIO,
+    desired_num_chunks: int,
+    split_special_token: bytes,
+) -> list[int]:
+    """
+    Chunk the file into parts that can be counted independently.
+    May return fewer chunks if the boundaries end up overlapping.
+    """
+    assert isinstance(split_special_token, bytes), "Must represent special token as a bytestring"
+
+    # Get total file size in bytes
+    file.seek(0, os.SEEK_END)
+    file_size = file.tell()
+    file.seek(0)
+
+    chunk_size = file_size // desired_num_chunks
+
+    # Initial guesses for chunk boundary locations, uniformly spaced
+    # Chunks start on previous index, don't include last index
+    chunk_boundaries = [i * chunk_size for i in range(desired_num_chunks + 1)]
+    chunk_boundaries[-1] = file_size
+
+    mini_chunk_size = 4096  # Read ahead by 4k bytes at a time
+
+    for bi in range(1, len(chunk_boundaries) - 1):
+        initial_position = chunk_boundaries[bi]
+        file.seek(initial_position)  # Start at boundary guess
+        while True:
+            mini_chunk = file.read(mini_chunk_size)  # Read a mini chunk
+
+            # If EOF, this boundary should be at the end of the file
+            if mini_chunk == b"":
+                chunk_boundaries[bi] = file_size
+                break
+
+            # Find the special token in the mini chunk
+            found_at = mini_chunk.find(split_special_token)
+            if found_at != -1:
+                chunk_boundaries[bi] = initial_position + found_at
+                break
+            initial_position += mini_chunk_size
+
+    # Make sure all boundaries are unique, but might be fewer than desired_num_chunks
+    return sorted(set(chunk_boundaries))
+
+def chunk_worker(input_path: str, start: int, end: int, special_tokens: tuple[str, ...]) -> Counter[Token]:
+    with open(input_path, "rb") as file:
+        file.seek(start)
+        chunk = file.read(end - start).decode("utf-8", errors="ignore")
+        return pretoken_count(chunk, list(special_tokens))
+
+
+def _chunk_worker_wrapper(job: tuple[str, int, int, tuple[str, ...]]) -> Counter[Token]:
+    return chunk_worker(*job)
+
+
 def train_bpe(input_path: str | os.PathLike,
     vocab_size: int,
     special_tokens: list[str] | None = None,
+    num_workers: int = 1,
     **kwargs,
 ) -> tuple[dict[int, bytes], list[tuple[bytes, bytes]]]:
     if special_tokens is None:
@@ -70,17 +127,31 @@ def train_bpe(input_path: str | os.PathLike,
         else:
             boundaries = find_chunk_boundaries(file, num_chunks, special_tokens[0].encode("utf-8"))
         
-    token_counts: Counter[Token] = Counter()
+    jobs = [
+        (str(input_path), start, end, tuple(special_tokens))
+        for start, end in zip(boundaries[:-1], boundaries[1:])
+        if start < end
+    ]
 
-    with open(input_path, "rb") as file:
-        for start, end in zip(boundaries[:-1], boundaries[1:]):
-            file.seek(start)
-            chunk = file.read(end - start).decode("utf-8", errors="ignore")
-            token_counts.update(pretoken_count(chunk, special_tokens))
+    token_counts: Counter[Token] = Counter()
+    if not jobs:
+        pass
+    elif num_workers <= 1 or len(jobs) == 1:
+        for job in jobs:
+            token_counts.update(chunk_worker(*job))
+    else:
+        worker_count = min(num_workers, len(jobs))
+        with mp.Pool(processes=worker_count) as pool:
+            for result in pool.imap_unordered(_chunk_worker_wrapper, jobs):
+                token_counts.update(result)
 
     vocab = {i: BYTE_TOKENS[i] for i in range(256)}
-    vocab.update({i + 256: token.encode("utf-8") for i, token in enumerate(special_tokens) if token not in vocab.values()})
-    num_merges = vocab_size - len(vocab)
+    next_id = 256
+    for token in special_tokens:
+        token_bytes = token.encode("utf-8")
+        if token_bytes not in vocab.values():
+            vocab[next_id] = token_bytes
+            next_id += 1
     if vocab_size <= len(vocab):
         return {idx: vocab[idx] for idx in range(vocab_size)}, []
 
