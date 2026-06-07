@@ -20,18 +20,18 @@ def main():
     print(f"Target vocab size: {vocab_size}")
     print(f"special tokens: {special_tokens}")
 
-    start_time = time.time()
+    # start_time = time.time()
 
-    token_counts = count_pretoken_frequencies(file_path, special_tokens, num_workers)
+    # token_counts = count_pretoken_frequencies(file_path, special_tokens, num_workers)
 
-    elapsed = time.time() - start_time
+    # elapsed = time.time() - start_time
     
-    print(f"Finished pretoken counting, spent: {elapsed:.2f}s")
-    print(f"unique pretokens: {len(token_counts)}")
+    # print(f"Finished pretoken counting, spent: {elapsed:.2f}s")
+    # print(f"unique pretokens: {len(token_counts)}")
 
-    with open(token_counts_path, "wb") as f:
-        pickle.dump(token_counts, f, protocol=pickle.HIGHEST_PROTOCOL)
-    print(f"token counts saved: {token_counts_path}")
+    # with open(token_counts_path, "wb") as f:
+    #     pickle.dump(token_counts, f, protocol=pickle.HIGHEST_PROTOCOL)
+    # print(f"token counts saved: {token_counts_path}")
 
     start_time = time.time()
     with open(token_counts_path, "rb") as f:
